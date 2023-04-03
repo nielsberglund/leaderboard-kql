@@ -1,0 +1,110 @@
+﻿# KQL code snippets for the "Develop a Real-Time Leaderboard Using Kafka and Azure Data Explorer - II" blog post.
+
+
+// add you as MSA user in order to be able to use dataexplorer.azure.com
+// add msa user
+.add database ['leaderboard'] admins ('msauser=<msa-user-id>') '<name-of-user>'
+
+// check what tables you have
+.show tables
+
+// if you don't have GamePlay follow the instructions in: 
+// https://nielsberglund.com/post/2023-03-19-develop-a-real-time-leaderboard-using-kafka-and-azure-data-explorer---i/
+
+// to check if a table have streaming ingestion
+.show table GamePlay policy streamingingestion
+
+// check if you have data in the GamePlay table
+GamePlay
+| count
+
+// if you have data in the table .clear it out
+.clear table GamePlay data
+
+// create a staging table
+.create table GamePlayStaging 
+(
+  PlayerID: int, GameID: int, 
+  Win: long, Stake: int, 
+  OriginalEventTime: datetime
+)
+
+// if you need to drop the mapping
+// .drop table GamePlayStaging ingestion csv mapping 'GamePlayStaging_mapping' 
+
+// create a mapping
+.create table GamePlayStaging ingestion csv mapping 'GamePlayStaging_mapping' 
+'['
+   '{"Column": "PlayerID", "Properties": {"Ordinal": "0"}},'
+   '{"Column": "GameID", "Properties": {"Ordinal": "1"}},'
+   '{"Column": "Win", "Properties": {"Ordinal": "2"}},'
+   '{"Column": "Stake", "Properties": {"Ordinal": "3"}},'
+   '{"Column": "OriginalEventTime", "Properties": {"Ordinal": "4"}}'
+']'
+
+
+// check what mappings you have
+.show table GamePlayStaging ingestion mappings
+
+// check that you have data in the GamePlayStaging table
+GamePlayStaging
+| take 10
+
+// looking at the data you see how the datetime is old
+// you now want to "update" it
+
+let start = toscalar(GamePlayStaging
+| summarize min(OriginalEventTime));
+GamePlayStaging
+| sort by OriginalEventTime asc
+| extend EventTime = datetime_add('millisecond', datetime_diff('millisecond', OriginalEventTime, start), now())
+| project-away OriginalEventTime
+
+
+// we want to ingest data into the staging table
+// but first we need to set up an update policy
+
+// .drop function ResetEventTime
+
+// create update policy function
+.create function
+  ResetEventTime()  
+  {
+    let start = toscalar(GamePlayStaging
+    | summarize min(OriginalEventTime));
+    GamePlayStaging
+    | sort by OriginalEventTime asc
+    | extend EventTime = datetime_add('millisecond', datetime_diff('millisecond', OriginalEventTime, start), now())
+    | project-away OriginalEventTime
+}
+
+// delete out all data from the staging table
+.clear table GamePlayStaging data
+
+//.delete table GamePlay policy update
+
+// create the update policy against the GamePlay table
+.alter table GamePlay policy update 
+@'['
+    '{ "IsEnabled": true,' 
+    '   "Source": "GamePlayStaging",' 
+    '   "Query": "ResetEventTime()",' 
+    '   "IsTransactional": true,' 
+    '   "PropagateIngestionProperties": false}'
+ ']'
+
+// check that you have the policy
+.show table GamePlay policy update 
+
+// now you can ingest from the csv file events.csv
+
+
+// after ingestion make sure it worked
+GamePlay
+| count
+
+GamePlay
+| take 10
+| order by EventTime asc
+
+
